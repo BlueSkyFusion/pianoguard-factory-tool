@@ -1,8 +1,17 @@
+#
 # factory_app.py
+#
+# Created on: 2025-06-25
+# Edited on: 2025-07-19
+#     Author: Andwardo
+#     Version: v1.0.1
+#
+
 import subprocess
 import hashlib
 import requests
 import os
+import platform
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import qrcode
@@ -10,8 +19,6 @@ from PIL import Image, ImageTk
 
 # --- Configuration ---
 API_SERVER_URL = "https://45.56.69.50"
-# IMPORTANT: The API key should be set as an environment variable on the factory PC.
-# Fallback to a default key for development purposes ONLY.
 FACTORY_API_KEY = os.environ.get("PIANOGUARD_FACTORY_KEY", "your_super_secret_factory_key")
 
 class FactoryProvisioningApp:
@@ -22,7 +29,7 @@ class FactoryProvisioningApp:
 
         self.style = ttk.Style(self.root)
         self.style.theme_use('clam')
-
+        os.makedirs("labels", exist_ok=True)
         self.create_widgets()
 
     def create_widgets(self):
@@ -31,8 +38,7 @@ class FactoryProvisioningApp:
 
         ttk.Label(main_frame, text="ESP32 Serial Port:", font=("Helvetica", 12)).pack(pady=5, anchor="w")
         self.port_entry = ttk.Entry(main_frame, font=("Helvetica", 12), width=50)
-        # Default port for macOS. Factory PC would likely use a COM port.
-        self.port_entry.insert(0, "/dev/cu.usbmodem101") 
+        self.port_entry.insert(0, "/dev/cu.usbmodem101")
         self.port_entry.pack(pady=5, fill=tk.X)
 
         self.run_button = ttk.Button(main_frame, text="Start Full Provisioning Process", command=self.run_provisioning_workflow, style="Accent.TButton")
@@ -52,7 +58,6 @@ class FactoryProvisioningApp:
         self.human_readable_id_label = ttk.Label(self.label_frame, text="Human-Readable ID: -", font=("Courier", 14, "bold"))
         self.human_readable_id_label.pack(pady=5)
 
-
     def log(self, message):
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
@@ -60,7 +65,7 @@ class FactoryProvisioningApp:
 
     def run_provisioning_workflow(self):
         self.run_button.config(state=tk.DISABLED)
-        self.log_text.delete(1.0, tk.END) # Clear log
+        self.log_text.delete(1.0, tk.END)
         port = self.port_entry.get()
 
         if not port:
@@ -70,7 +75,7 @@ class FactoryProvisioningApp:
 
         try:
             self.log(">>> [STEP 1/5] Flashing Firmware...")
-            # self.flash_firmware(port) # Uncomment when ready
+            # self.flash_firmware(port)
             self.log("SUCCESS: Firmware flash complete (simulated).")
 
             self.log("\n>>> [STEP 2/5] Reading MAC Address...")
@@ -131,6 +136,17 @@ class FactoryProvisioningApp:
                 error_text += f"\nResponse Body: {e.response.text}"
             raise RuntimeError(f"API call failed: {error_text}")
 
+    def get_next_unit_number(self):
+        counter_file = "labels/unit_counter.txt"
+        if os.path.exists(counter_file):
+            with open(counter_file) as f:
+                count = int(f.read().strip()) + 1
+        else:
+            count = 1
+        with open(counter_file, "w") as f:
+            f.write(str(count))
+        return f"{count:03}"
+
     def generate_label_info(self, full_hash):
         short_id = f"{full_hash[0:4].upper()}-{full_hash[4:8].upper()}"
         self.human_readable_id_label.config(text=f"Human-Readable ID: {short_id}")
@@ -139,10 +155,29 @@ class FactoryProvisioningApp:
         qr.add_data(full_hash)
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
-        
+
+        unit_num = self.get_next_unit_number()
+        filename_base = f"labels/device_{unit_num}_{short_id}"
+        img_path = f"{filename_base}.png"
+        txt_path = f"{filename_base}.txt"
+
+        img.save(img_path)
+        with open(txt_path, "w") as f:
+            f.write(f"MAC Hash: {full_hash}\n")
+            f.write(f"Human-Readable ID: {short_id}\n")
+
+        if platform.system() == "Darwin":
+            try:
+                subprocess.run(["lp", img_path], check=True)
+                self.log(f"SUCCESS: Printed label: {img_path}")
+            except subprocess.CalledProcessError as e:
+                self.log(f"WARNING: Print failed: {e}")
+        else:
+            self.log("INFO: Auto-printing only supported on macOS")
+
         self.qr_photo_image = ImageTk.PhotoImage(img)
         self.qr_code_label.config(image=self.qr_photo_image)
-        self.log("SUCCESS: Label info generated.")
+        self.log("SUCCESS: Label info generated and saved.")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import qrcode
 from PIL import Image, ImageTk
 
 # --- Configuration ---
-API_SERVER_URL = "http://45.56.69.50:3001"
+API_SERVER_URL = "https://45.56.69.50"
 # IMPORTANT: The API key should be set as an environment variable on the factory PC.
 # Fallback to a default key for development purposes ONLY.
 FACTORY_API_KEY = os.environ.get("PIANOGUARD_FACTORY_KEY", "your_super_secret_factory_key")
@@ -32,7 +32,7 @@ class FactoryProvisioningApp:
         ttk.Label(main_frame, text="ESP32 Serial Port:", font=("Helvetica", 12)).pack(pady=5, anchor="w")
         self.port_entry = ttk.Entry(main_frame, font=("Helvetica", 12), width=50)
         # Default port for macOS. Factory PC would likely use a COM port.
-        self.port_entry.insert(0, "/dev/tty.SLAB_USBtoUART") 
+        self.port_entry.insert(0, "/dev/cu.usbmodem101") 
         self.port_entry.pack(pady=5, fill=tk.X)
 
         self.run_button = ttk.Button(main_frame, text="Start Full Provisioning Process", command=self.run_provisioning_workflow, style="Accent.TButton")
@@ -117,10 +117,10 @@ class FactoryProvisioningApp:
     def pre_register_device_in_db(self, device_id):
         url = f"{API_SERVER_URL}/api/factory/provision"
         headers = {"Content-Type": "application/json", "x-factory-api-key": FACTORY_API_KEY}
-        payload = {"device_id": device_id}
+        payload = {"mac_hash": device_id}
 
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            response = requests.post(url, headers=headers, json=payload, timeout=10, verify=False)
             self.log(f"API Response Status: {response.status_code}")
             response.raise_for_status()
             self.log(f"SUCCESS: API call successful. {response.json().get('message')}")

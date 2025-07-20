@@ -1,186 +1,171 @@
-#
-# factory_app.py
-#
-# Created on: 2025-06-25
-# Edited on: 2025-07-19
-#     Author: Andwardo
-#     Version: v1.0.1
-#
+#!/Library/Frameworks/Python.framework/Versions/3.11/bin/python3
 
+import os
 import subprocess
 import hashlib
+import json
 import requests
-import os
-import platform
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
 import qrcode
-from PIL import Image, ImageTk
+import tkinter as tk
+from tkinter import ttk, messagebox
+from datetime import datetime
 
-# --- Configuration ---
-API_SERVER_URL = "https://45.56.69.50"
+FIRMWARE_PATH = os.path.join(os.path.dirname(__file__), "firmware", "firmware.bin")
+LABELS_DIR = os.path.join(os.path.dirname(__file__), "labels")
+API_SERVER_URL = "https://your-api-server.com/api/v1/register"
 FACTORY_API_KEY = os.environ.get("PIANOGUARD_FACTORY_KEY", "your_super_secret_factory_key")
+UNIT_COUNTER_PATH = os.path.join(LABELS_DIR, "unit_counter.txt")
 
-class FactoryProvisioningApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("PianoGuard Factory Provisioning Tool v1.0")
-        self.root.geometry("600x700")
+os.makedirs(LABELS_DIR, exist_ok=True)
 
-        self.style = ttk.Style(self.root)
-        self.style.theme_use('clam')
-        os.makedirs("labels", exist_ok=True)
-        self.create_widgets()
+def flash_firmware(port):
+    print(">>> [STEP 1/5] Flashing Firmware...")
+    if not os.path.isfile(FIRMWARE_PATH):
+        raise FileNotFoundError("Firmware binary not found. Build it first.")
 
-    def create_widgets(self):
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+    cmd = [
+        "esptool.py",
+        "--chip", "esp32s3",
+        "--port", port,
+        "--baud", "460800",
+        "write_flash", "-z", "0x1000",
+        FIRMWARE_PATH
+    ]
 
-        ttk.Label(main_frame, text="ESP32 Serial Port:", font=("Helvetica", 12)).pack(pady=5, anchor="w")
-        self.port_entry = ttk.Entry(main_frame, font=("Helvetica", 12), width=50)
-        self.port_entry.insert(0, "/dev/cu.usbmodem101")
-        self.port_entry.pack(pady=5, fill=tk.X)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    print(result.stdout)
+    if result.returncode != 0:
+        print(result.stderr)
+        raise Exception("Firmware flashing failed.")
+    print("SUCCESS: Firmware flash complete.")
 
-        self.run_button = ttk.Button(main_frame, text="Start Full Provisioning Process", command=self.run_provisioning_workflow, style="Accent.TButton")
-        self.run_button.pack(pady=20, fill=tk.X, ipady=10)
-        self.style.configure("Accent.TButton", font=("Helvetica", 14, "bold"), foreground="white", background="#007bff")
+def get_mac_address(port):
+    print(">>> [STEP 2/5] Reading MAC Address...")
+    cmd = [
+        "esptool.py",
+        "--port", port,
+        "read_mac"
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(result.stderr)
+        raise Exception("Failed to read MAC address.")
 
-        ttk.Separator(main_frame, orient="horizontal").pack(pady=10, fill=tk.X)
+    for line in result.stdout.splitlines():
+        if "MAC:" in line:
+            mac = line.split("MAC:")[-1].strip()
+            print(f"SUCCESS: Found MAC Address: {mac}")
+            return mac
+    raise Exception("MAC address not found.")
 
-        ttk.Label(main_frame, text="Process Log:", font=("Helvetica", 12)).pack(pady=5, anchor="w")
-        self.log_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, height=15, font=("Courier", 10))
-        self.log_text.pack(pady=5, fill=tk.BOTH, expand=True)
+def hash_device_id(mac):
+    print(f">>> [STEP 3/5] Hashing Device ID from MAC ({mac})...")
+    hashed = hashlib.sha256(mac.encode()).hexdigest()[:16].upper()
+    print(f"SUCCESS: Hashed to {hashed}")
+    return hashed
 
-        self.label_frame = ttk.LabelFrame(main_frame, text="Generated Label Info", padding="10")
-        self.label_frame.pack(pady=10, fill=tk.X)
-        self.qr_code_label = ttk.Label(self.label_frame)
-        self.qr_code_label.pack(pady=10)
-        self.human_readable_id_label = ttk.Label(self.label_frame, text="Human-Readable ID: -", font=("Courier", 14, "bold"))
-        self.human_readable_id_label.pack(pady=5)
+def post_to_api(device_id):
+    print(">>> [STEP 4/5] Pre-registering Device in Database...")
+    headers = {
+        "Authorization": f"Bearer {FACTORY_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "device_id": device_id
+    }
+    response = requests.post(API_SERVER_URL, headers=headers, data=json.dumps(payload))
+    print(f"API Response Status: {response.status_code}")
+    if response.status_code != 200:
+        raise Exception(f"API error: {response.text}")
+    print("SUCCESS: API call successful.", response.text)
 
-    def log(self, message):
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.root.update_idletasks()
+def get_next_unit_number():
+    try:
+        with open(UNIT_COUNTER_PATH, "r") as f:
+            count = int(f.read().strip()) + 1
+    except FileNotFoundError:
+        count = 1
+    with open(UNIT_COUNTER_PATH, "w") as f:
+        f.write(str(count))
+    return count
 
-    def run_provisioning_workflow(self):
-        self.run_button.config(state=tk.DISABLED)
-        self.log_text.delete(1.0, tk.END)
-        port = self.port_entry.get()
+def generate_qr_label(device_id):
+    print(">>> [STEP 5/5] Generating Label Info...")
+    unit_number = get_next_unit_number()
+    short_id = device_id[-8:]
+    label_name = f"device_{unit_number:03d}_{short_id}.png"
+    label_path = os.path.join(LABELS_DIR, label_name)
 
-        if not port:
-            messagebox.showerror("Error", "Serial port cannot be empty.")
-            self.run_button.config(state=tk.NORMAL)
-            return
+    img = qrcode.make(device_id)
+    img.save(label_path)
 
-        try:
-            self.log(">>> [STEP 1/5] Flashing Firmware...")
-            # self.flash_firmware(port)
-            self.log("SUCCESS: Firmware flash complete (simulated).")
+    label_txt_path = label_path.replace(".png", ".txt")
+    with open(label_txt_path, "w") as f:
+        f.write(device_id)
 
-            self.log("\n>>> [STEP 2/5] Reading MAC Address...")
-            mac_address = self.get_mac_address(port)
+    print(f"SUCCESS: Printed label: {label_path}")
+    print("SUCCESS: Label info generated and saved.")
+    return label_path, short_id
 
-            self.log(f"\n>>> [STEP 3/5] Hashing Device ID from MAC ({mac_address})...")
-            device_id_hash = self.hash_id(mac_address)
+def run_factory_process(port, log_widget, id_label):
+    try:
+        log_widget.delete("1.0", tk.END)
 
-            self.log(f"\n>>> [STEP 4/5] Pre-registering Device in Database...")
-            if self.pre_register_device_in_db(device_id_hash):
-                self.log(f"\n>>> [STEP 5/5] Generating Label Info...")
-                self.generate_label_info(device_id_hash)
-            else:
-                raise RuntimeError("Could not pre-register device. Aborting.")
+        flash_firmware(port)
+        log_widget.insert(tk.END, "Firmware flashed.\n")
+        log_widget.update()
 
-            messagebox.showinfo("Success", "Device provisioning completed successfully!")
+        mac = get_mac_address(port)
+        log_widget.insert(tk.END, f"MAC Address: {mac}\n")
+        log_widget.update()
 
-        except Exception as e:
-            self.log(f"\n---!!!-!!!---\nERROR: {e}\n---!!!-!!!---")
-            messagebox.showerror("Provisioning Failed", f"An error occurred: {e}")
-        finally:
-            self.run_button.config(state=tk.NORMAL)
+        device_id = hash_device_id(mac)
+        log_widget.insert(tk.END, f"Device ID: {device_id}\n")
+        log_widget.update()
 
-    def get_mac_address(self, port):
-        try:
-            command = ["esptool.py", "--port", port, "read_mac"]
-            result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=15)
-            for line in result.stdout.splitlines():
-                if "MAC:" in line:
-                    mac = line.split("MAC:")[1].strip()
-                    self.log(f"SUCCESS: Found MAC Address: {mac}")
-                    return mac
-            raise RuntimeError("Could not find MAC address in esptool.py output.")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("esptool.py timed out. Check connection.")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"esptool.py failed. Is device on {port}?\nError: {e.stderr}")
+        post_to_api(device_id)
+        log_widget.insert(tk.END, "API call successful.\n")
+        log_widget.update()
 
-    def hash_id(self, input_string):
-        sha256 = hashlib.sha256(input_string.encode('utf-8')).hexdigest()
-        self.log(f"SUCCESS: Hashed to {sha256[:20]}...")
-        return sha256
+        _, short_id = generate_qr_label(device_id)
+        id_label.config(text=f"Human-Readable ID: {short_id}")
+        log_widget.insert(tk.END, f"QR label created: {short_id}\n")
 
-    def pre_register_device_in_db(self, device_id):
-        url = f"{API_SERVER_URL}/api/factory/provision"
-        headers = {"Content-Type": "application/json", "x-factory-api-key": FACTORY_API_KEY}
-        payload = {"mac_hash": device_id}
+        messagebox.showinfo("Success", "Device provisioning completed successfully!")
 
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=10, verify=False)
-            self.log(f"API Response Status: {response.status_code}")
-            response.raise_for_status()
-            self.log(f"SUCCESS: API call successful. {response.json().get('message')}")
-            return True
-        except requests.exceptions.RequestException as e:
-            error_text = str(e)
-            if e.response is not None:
-                error_text += f"\nResponse Body: {e.response.text}"
-            raise RuntimeError(f"API call failed: {error_text}")
+    except Exception as e:
+        log_widget.insert(tk.END, f"---!!!-!!!---\nERROR: {str(e)}\n---!!!-!!!---\n")
+        messagebox.showerror("Error", f"An error occurred: {e}")
 
-    def get_next_unit_number(self):
-        counter_file = "labels/unit_counter.txt"
-        if os.path.exists(counter_file):
-            with open(counter_file) as f:
-                count = int(f.read().strip()) + 1
-        else:
-            count = 1
-        with open(counter_file, "w") as f:
-            f.write(str(count))
-        return f"{count:03}"
+def create_gui():
+    root = tk.Tk()
+    root.title("PianoGuard Factory Provisioning Tool v1.1")
 
-    def generate_label_info(self, full_hash):
-        short_id = f"{full_hash[0:4].upper()}-{full_hash[4:8].upper()}"
-        self.human_readable_id_label.config(text=f"Human-Readable ID: {short_id}")
+    frm = ttk.Frame(root, padding=10)
+    frm.grid()
 
-        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=4, border=2)
-        qr.add_data(full_hash)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
+    port_label = ttk.Label(frm, text="ESP32 Serial Port:")
+    port_label.grid(column=0, row=0, sticky="w")
 
-        unit_num = self.get_next_unit_number()
-        filename_base = f"labels/device_{unit_num}_{short_id}"
-        img_path = f"{filename_base}.png"
-        txt_path = f"{filename_base}.txt"
+    port_entry = ttk.Entry(frm, width=40)
+    port_entry.insert(0, "/dev/cu.usbmodem101")
+    port_entry.grid(column=0, row=1, columnspan=2, sticky="we", pady=5)
 
-        img.save(img_path)
-        with open(txt_path, "w") as f:
-            f.write(f"MAC Hash: {full_hash}\n")
-            f.write(f"Human-Readable ID: {short_id}\n")
+    start_button = ttk.Button(
+        frm,
+        text="Start Full Provisioning Process",
+        command=lambda: run_factory_process(port_entry.get(), log_output, id_output)
+    )
+    start_button.grid(column=0, row=2, columnspan=2, pady=10)
 
-        if platform.system() == "Darwin":
-            try:
-                subprocess.run(["lp", img_path], check=True)
-                self.log(f"SUCCESS: Printed label: {img_path}")
-            except subprocess.CalledProcessError as e:
-                self.log(f"WARNING: Print failed: {e}")
-        else:
-            self.log("INFO: Auto-printing only supported on macOS")
+    log_output = tk.Text(frm, height=15, width=80, bg="black", fg="white")
+    log_output.grid(column=0, row=3, columnspan=2)
 
-        self.qr_photo_image = ImageTk.PhotoImage(img)
-        self.qr_code_label.config(image=self.qr_photo_image)
-        self.log("SUCCESS: Label info generated and saved.")
+    ttk.Label(frm, text="Generated Label Info:").grid(column=0, row=4, sticky="w")
+    id_output = ttk.Label(frm, text="Human-Readable ID: -", font=("Courier", 14))
+    id_output.grid(column=0, row=5, sticky="w")
 
+    root.mainloop()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = FactoryProvisioningApp(root)
-    root.mainloop()
+    create_gui()

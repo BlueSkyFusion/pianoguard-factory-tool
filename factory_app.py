@@ -1,171 +1,97 @@
-#!/Library/Frameworks/Python.framework/Versions/3.11/bin/python3
+"""
+factory_app.py
+
+Created on: 2025-06-25
+Edited on: 2025-07-25
+Version: v1.0.3
+Author: R. Andrew Ballard (c) 2025 "Andwardo"
+Now prints both QR code and text label with human-readable ID to printer
+"""
 
 import os
-import subprocess
-import hashlib
-import json
+import tkinter as tk
+from tkinter import messagebox
 import requests
 import qrcode
-import tkinter as tk
-from tkinter import ttk, messagebox
-from datetime import datetime
+import hashlib
+import subprocess
 
-FIRMWARE_PATH = os.path.join(os.path.dirname(__file__), "firmware", "firmware.bin")
-LABELS_DIR = os.path.join(os.path.dirname(__file__), "labels")
-API_SERVER_URL = "https://your-api-server.com/api/v1/register"
-FACTORY_API_KEY = os.environ.get("PIANOGUARD_FACTORY_KEY", "your_super_secret_factory_key")
-UNIT_COUNTER_PATH = os.path.join(LABELS_DIR, "unit_counter.txt")
+from dotenv import load_dotenv
+load_dotenv()
 
-os.makedirs(LABELS_DIR, exist_ok=True)
+FACTORY_KEY = os.getenv("PIANOGUARD_FACTORY_KEY")
+API_URL = "https://dev1.pgapi.net/register-device"
 
-def flash_firmware(port):
-    print(">>> [STEP 1/5] Flashing Firmware...")
-    if not os.path.isfile(FIRMWARE_PATH):
-        raise FileNotFoundError("Firmware binary not found. Build it first.")
 
-    cmd = [
-        "esptool.py",
-        "--chip", "esp32s3",
-        "--port", port,
-        "--baud", "460800",
-        "write_flash", "-z", "0x1000",
-        FIRMWARE_PATH
-    ]
+def get_mac_address():
+    cmd = "system_profiler SPHardwareDataType | awk '/MAC Address/ { print $3 }'"
+    mac = subprocess.check_output(cmd, shell=True).decode().strip()
+    return mac
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    print(result.stdout)
-    if result.returncode != 0:
-        print(result.stderr)
-        raise Exception("Firmware flashing failed.")
-    print("SUCCESS: Firmware flash complete.")
 
-def get_mac_address(port):
-    print(">>> [STEP 2/5] Reading MAC Address...")
-    cmd = [
-        "esptool.py",
-        "--port", port,
-        "read_mac"
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(result.stderr)
-        raise Exception("Failed to read MAC address.")
+def generate_device_id(mac_address):
+    return hashlib.sha256(mac_address.encode()).hexdigest().upper()[:16]
 
-    for line in result.stdout.splitlines():
-        if "MAC:" in line:
-            mac = line.split("MAC:")[-1].strip()
-            print(f"SUCCESS: Found MAC Address: {mac}")
-            return mac
-    raise Exception("MAC address not found.")
 
-def hash_device_id(mac):
-    print(f">>> [STEP 3/5] Hashing Device ID from MAC ({mac})...")
-    hashed = hashlib.sha256(mac.encode()).hexdigest()[:16].upper()
-    print(f"SUCCESS: Hashed to {hashed}")
-    return hashed
-
-def post_to_api(device_id):
-    print(">>> [STEP 4/5] Pre-registering Device in Database...")
-    headers = {
-        "Authorization": f"Bearer {FACTORY_API_KEY}",
-        "Content-Type": "application/json"
-    }
+def register_device(serial):
     payload = {
-        "device_id": device_id
+        "factory_key": FACTORY_KEY,
+        "serial": serial
     }
-    response = requests.post(API_SERVER_URL, headers=headers, data=json.dumps(payload))
-    print(f"API Response Status: {response.status_code}")
-    if response.status_code != 200:
-        raise Exception(f"API error: {response.text}")
-    print("SUCCESS: API call successful.", response.text)
 
-def get_next_unit_number():
     try:
-        with open(UNIT_COUNTER_PATH, "r") as f:
-            count = int(f.read().strip()) + 1
-    except FileNotFoundError:
-        count = 1
-    with open(UNIT_COUNTER_PATH, "w") as f:
-        f.write(str(count))
-    return count
+        response = requests.post(API_URL, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.json()
 
-def generate_qr_label(device_id):
-    print(">>> [STEP 5/5] Generating Label Info...")
-    unit_number = get_next_unit_number()
-    short_id = device_id[-8:]
-    label_name = f"device_{unit_number:03d}_{short_id}.png"
-    label_path = os.path.join(LABELS_DIR, label_name)
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
 
-    img = qrcode.make(device_id)
-    img.save(label_path)
+    except requests.exceptions.HTTPError as err:
+        try:
+            return {"error": response.json()}
+        except Exception:
+            return {"error": str(err)}
 
-    label_txt_path = label_path.replace(".png", ".txt")
-    with open(label_txt_path, "w") as f:
-        f.write(device_id)
 
-    print(f"SUCCESS: Printed label: {label_path}")
-    print("SUCCESS: Label info generated and saved.")
-    return label_path, short_id
+def print_assets(device_id, mac_address):
+    short_id = device_id[-6:]
 
-def run_factory_process(port, log_widget, id_label):
-    try:
-        log_widget.delete("1.0", tk.END)
+    qr = qrcode.make(device_id)
+    qr_path = f"{device_id}.png"
+    qr.save(qr_path)
 
-        flash_firmware(port)
-        log_widget.insert(tk.END, "Firmware flashed.\n")
-        log_widget.update()
+    label_path = f"{device_id}_label.txt"
+    with open(label_path, "w") as f:
+        f.write("PianoGuard Device\n")
+        f.write(f"ID: {short_id}\n")
+        f.write(f"MAC: {mac_address}\n")
 
-        mac = get_mac_address(port)
-        log_widget.insert(tk.END, f"MAC Address: {mac}\n")
-        log_widget.update()
+    subprocess.run(["lp", qr_path])
+    subprocess.run(["lp", label_path])
 
-        device_id = hash_device_id(mac)
-        log_widget.insert(tk.END, f"Device ID: {device_id}\n")
-        log_widget.update()
 
-        post_to_api(device_id)
-        log_widget.insert(tk.END, "API call successful.\n")
-        log_widget.update()
+def main():
+    mac = get_mac_address()
+    device_id = generate_device_id(mac)
 
-        _, short_id = generate_qr_label(device_id)
-        id_label.config(text=f"Human-Readable ID: {short_id}")
-        log_widget.insert(tk.END, f"QR label created: {short_id}\n")
+    print(f"Firmware flashed.\nMAC Address: {mac}\nDevice ID: {device_id}")
 
-        messagebox.showinfo("Success", "Device provisioning completed successfully!")
+    result = register_device(device_id)
 
-    except Exception as e:
-        log_widget.insert(tk.END, f"---!!!-!!!---\nERROR: {str(e)}\n---!!!-!!!---\n")
-        messagebox.showerror("Error", f"An error occurred: {e}")
+    print("---!!!-!!!---")
+    print("RESPONSE:", result)
+    print("---!!!-!!!---")
 
-def create_gui():
     root = tk.Tk()
-    root.title("PianoGuard Factory Provisioning Tool v1.1")
+    root.withdraw()
 
-    frm = ttk.Frame(root, padding=10)
-    frm.grid()
+    if "status" in result and result["status"] == "ok":
+        print_assets(device_id, mac)
+        messagebox.showinfo("Success", f"Device {device_id[-6:]} registered and printed.")
+    else:
+        messagebox.showerror("Error", f"API error: {result}")
 
-    port_label = ttk.Label(frm, text="ESP32 Serial Port:")
-    port_label.grid(column=0, row=0, sticky="w")
-
-    port_entry = ttk.Entry(frm, width=40)
-    port_entry.insert(0, "/dev/cu.usbmodem101")
-    port_entry.grid(column=0, row=1, columnspan=2, sticky="we", pady=5)
-
-    start_button = ttk.Button(
-        frm,
-        text="Start Full Provisioning Process",
-        command=lambda: run_factory_process(port_entry.get(), log_output, id_output)
-    )
-    start_button.grid(column=0, row=2, columnspan=2, pady=10)
-
-    log_output = tk.Text(frm, height=15, width=80, bg="black", fg="white")
-    log_output.grid(column=0, row=3, columnspan=2)
-
-    ttk.Label(frm, text="Generated Label Info:").grid(column=0, row=4, sticky="w")
-    id_output = ttk.Label(frm, text="Human-Readable ID: -", font=("Courier", 14))
-    id_output.grid(column=0, row=5, sticky="w")
-
-    root.mainloop()
 
 if __name__ == "__main__":
-    create_gui()
+    main()

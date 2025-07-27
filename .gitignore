@@ -57,3 +57,4 @@ htmlcov/
 # labels/*.txt
 # firmware/firmware.bin
 .env
+.DS_Store
